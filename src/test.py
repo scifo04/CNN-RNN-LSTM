@@ -2,6 +2,6 @@ import numpy as np
 from utilfunc import UtilisationFunctions
 import torch
 
-kernel = np.random.randn(6,3,3,3)
+kernel = np.eye(5)
 
 print(kernel)

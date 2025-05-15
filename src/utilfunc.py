@@ -21,6 +21,14 @@ class UtilisationFunctions:
         return 1 if x > 0 else 0
     
     @staticmethod
+    def xavier(input_units, output_units, counter_type: Literal["weight", "bias"]="weight"):
+        if (counter_type == "weight"):
+            limit = np.sqrt(6 / (input_units + output_units))
+            return np.random.uniform(-limit, limit, (input_units, output_units))
+        else:
+            return np.zeros((output_units))
+    
+    @staticmethod
     def pad(x: np.ndarray, pad_num: int):
         new_arr = np.zeros((len(x)+2*pad_num, len(x)+2*pad_num))
         for i in range(pad_num, len(new_arr)-pad_num):
@@ -65,3 +73,15 @@ class UtilisationFunctions:
                 else:
                     poolRes[i][j] = UtilisationFunctions.avgArray(smoled_big)
         return poolRes
+    
+    @staticmethod
+    def sigmoid(x):
+        return 1 / (1 + np.exp(-x))
+    
+    @staticmethod
+    def sigmoid_derivative(x):
+        return x / (1 - x)
+    
+    @staticmethod
+    def tanh_derivative(x):
+        return (1 - x ** 2)
