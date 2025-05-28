@@ -19,7 +19,8 @@ class Conv2D:
         self.last_image = x
 
         if self.padding > 0:
-            x = UtilisationFunctions.pad(x, self.padding)
+            x = np.pad(x, ((0, 0), (self.padding, self.padding), (self.padding, self.padding)))
+
 
         size = (len(x[0]) - self.kernel_size) // self.stride + 1
         out = np.zeros((self.out_channels, size, size))
