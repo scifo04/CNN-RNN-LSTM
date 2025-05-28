@@ -17,19 +17,24 @@ class Conv2D:
 
     def forward(self, x: np.ndarray):
         self.last_image = x
+
+        if self.padding > 0:
+            x = UtilisationFunctions.pad(x, self.padding)
+
         size = (len(x[0]) - self.kernel_size) // self.stride + 1
         out = np.zeros((self.out_channels, size, size))
         for i in range(len(self.kernel)):
             temp_out = np.zeros((size, size))
             for j in range(len(self.kernel[i])):
-                temp_conv = UtilisationFunctions.convMul(x[j], self.kernel[i][j], self.stride, self.bias)
+                temp_conv = UtilisationFunctions.convMul(x[j], self.kernel[i][j], self.stride)
                 temp_out = temp_out + temp_conv
+            temp_out += self.bias[i]
             out[i] = temp_out
         return out
     
     def backward(self, dLast: np.ndarray, learning_rate=0.005):
         dinput = np.zeros_like(self.last_image)
-        dweight = np.zeros_like(self.kernel_size)
+        dweight = np.zeros_like(self.kernel)
         dbias = np.zeros(self.out_channels)
 
         for oc in range(self.out_channels):
@@ -38,11 +43,16 @@ class Conv2D:
                 for i in range(dLast.shape[1]):
                     for j in range(dLast.shape[2]):
                         col_start = i * self.stride
-                        col_end = col_start + self.kernel.shape[2]
+                        col_end = col_start + self.kernel.shape[3]
                         row_start = j * self.stride
-                        row_end = row_start + self.kernel.shape[3]
+                        row_end = row_start + self.kernel.shape[2]
+                        # print(f"{i}, {j}, {self.kernel.shape}")
 
-                        last_image_slice = self.last_image[ic, col_start:col_end, row_start:row_end]
+                        if row_end > self.last_image.shape[1] or col_end > self.last_image.shape[2]:
+                            # print("More than")
+                            continue
+
+                        last_image_slice = self.last_image[ic, row_start:row_end, col_start:col_end]
                         dweight[oc, ic] += last_image_slice * dLast[oc, i, j]
                         dinput[ic, col_start:col_end, row_start:row_end] += self.kernel[oc, ic] * dLast[oc, i, j]
         
@@ -58,9 +68,11 @@ class Pooling:
 
     def forward(self, x: np.ndarray):
         self.last_image = x
-        size = (len(x) - self.kernel_size) // self.stride + 1
-        out = np.zeros((len(x), size, size))
-        for i in range(len(x)):
+        height = x.shape[1]
+        size = (height - self.kernel_size) // self.stride + 1
+        # print(f"Size: {size}")
+        out = np.zeros((x.shape[0], size, size))
+        for i in range(x.shape[0]):
             out[i] = UtilisationFunctions.pooling(x[i], self.kernel_size, self.stride, self.method)
         return out
     
@@ -102,20 +114,23 @@ class ReLU:
     
 class Flatten:
     def __init__(self):
-        self.last_image = None
+        self.last_shape = None
 
     def forward(self, x: np.ndarray):
-        return x.flatten().reshape(1,-1)
-    
+        self.last_shape = x.shape
+        reshaped = x.reshape(1, -1)
+        # print("📦 Shape after Flatten:", x.shape)
+        return reshaped
+
     def backward(self, dLast: np.ndarray):
-        return dLast.reshape(self.last_image)
+        return dLast.reshape(self.last_shape)
     
 class FullyConnected:
     def __init__(
         self,
         input_size: int,
         output_size: int,
-        activation: Literal["relu", "softmax"],
+        activation: Literal["reLU", "softmax"],
         weight_init: Literal["zero", "uniform", "normal", "he", "xavier"],
         lower: float,
         upper: float,
@@ -168,6 +183,10 @@ class FullyConnected:
 
     def forward(self, x):
         self.input = x
+        # print("⚠️ FullyConnected.forward() called")
+        # print("   Input shape:", x.shape)
+        # print("   Weights shape:", self.weights.shape)
+        # print("   Biases shape:", self.biases.shape)
         z = x @ self.weights
         if self.use_rmsnorm:
             z = self.rmsnorm.forward(z)
@@ -246,470 +265,143 @@ class Dropout:
         return (dLast * self.mask) / (1.0 - self.dropout_rate)
     
 class RNN:
-    def __init__(self, input_size, hidden_size, num_layers, taken_output, input_length, hidden_length, bidirectional=True):
-        # Attribute Definition
+    def __init__(self, unit, input_size, timestep, return_sequence, bidirectional=False):
+        self.unit = unit
         self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
+        self.timestep = timestep
         self.bidirectional = bidirectional
         self.last_input = None
-        self.hidden_state = None
-        self.hidden_state_reverse = None
-        self.taken_output = taken_output
-        self.input_length = input_length
-        self.hidden_length = hidden_length
-        
-        # Hidden State
-        self.h_begin = [np.zeros(self.hidden_size, self.hidden_size) for _ in range(num_layers)]
+        self.return_sequence = return_sequence
+
+        self.input_weights = UtilisationFunctions.xavier(input_size, unit, 'weight')
+        self.hidden_weights = UtilisationFunctions.xavier(unit, unit, 'weight')
+
+        self.bias = UtilisationFunctions.xavier(1, unit, 'bias')
+
+        self.h_t = np.zeros((timestep, unit))
 
         if self.bidirectional:
-            self.h_end = [np.zeros(self.hidden_size, self.hidden_size) for _ in range(num_layers)]
+            self.input_weights_reverse = UtilisationFunctions.xavier(input_size, unit, 'weight')
+            self.hidden_weights_reverse = UtilisationFunctions.xavier(unit, unit, 'weight')
 
-        # Weight Utilisation
-        self.ih_weights = [UtilisationFunctions.xavier(self.input_size, self.hidden_size, "weight") for _ in range(input_length)]
-        self.hh_weights = [[UtilisationFunctions.xavier(self.hidden_size, self.hidden_size, "weight") for _ in range(hidden_length)] for _ in range(num_layers)]
-        self.hh_weights_up = [[UtilisationFunctions.xavier(self.hidden_size, self.hidden_size, "weight") for _ in range(hidden_length)] for _ in range(num_layers - 1)]
+            self.bias_reverse = UtilisationFunctions.xavier(1, unit, 'bias')
 
-        if self.bidirectional:
-            self.ih_weights_reverse = [UtilisationFunctions.xavier(self.input_size, self.hidden_size, "weight") for _ in range(input_length)]
-            self.hh_weights_reverse = [[UtilisationFunctions.xavier(self.hidden_size, self.hidden_size, "weight") for _ in range(hidden_length)] for _ in range(num_layers)]
-            self.hh_weights_reverse_up = [[UtilisationFunctions.xavier(self.hidden_size, self.hidden_size, "weight") for _ in range(hidden_length)] for _ in range(num_layers - 1)]
-            self.final_hidden_state = None
-
-        # Bias Utilisation
-        self.hh_bias = [UtilisationFunctions.xavier(self.hidden_size, self.hidden_size, "bias") for _ in range(num_layers)]
-
-        if self.bidirectional:
-            self.hh_bias_reverse = [UtilisationFunctions.xavier(self.hidden_size, self.hidden_size, "bias") for _ in range(num_layers)]
+            self.h_t_reverse = np.zeros((timestep, unit))
 
     def forward(self, x: np.ndarray):
         self.last_input = x
-        self.hidden_state = np.zeros((self.num_layers, self.hidden_length, self.hidden_size))
-        self.hidden_state_reverse = np.zeros((self.num_layers, self.hidden_length, self.hidden_size))
-        self.final_hidden_state = np.zeros((self.taken_output, 2 * self.hidden_size))
-        h_res = np.zeros(self.hidden_size)
-        h_res_reverse = np.zeros(self.hidden_size)
+        h = np.zeros((self.timestep, self.unit))
 
-        for layer in range(self.num_layers):
-            outputs = []
+        if self.bidirectional:
+            h_reverse = np.zeros((self.timestep, self.unit))
 
-            if (layer <= 0):
-                for t in range(self.hidden_length):
-                    x_t = x[t] if t < self.input_length else np.zeros(self.input_size)
-                    h_res = np.dot(self.hh_weights[layer][t], self.h_begin[layer] if t == 0 else self.hidden_state[layer][t-1]) + self.hh_bias[layer][t]
-                    h_res = np.tanh(h_res + (np.dot(x_t, self.ih_weights[t])))
-                    self.hidden_state[layer][t] = h_res
-            elif (layer > 0 and layer < self.num_layers - 1):
-                for t in range(self.hidden_length):
-                    h_res = np.dot(self.hh_weights[layer][t], self.h_begin[layer] if t == 0 else self.hidden_state[layer][t-1]) + self.hh_bias[layer][t]
-                    h_res = np.tanh(h_res + (np.dot(self.hidden_state[layer-1][t], self.hh_weights_up[layer-1][t])))
-                    self.hidden_state[layer][t] = h_res
+        for t in range(self.timestep):
+            h_used = np.zeros((self.unit)) if t == 0 else self.h_t[t-1]
+            x_used = x[t]
+            h[t] = np.tanh(x_used @ self.input_weights + h_used @ self.hidden_weights + self.bias)
+            self.h_t[t] = h[t]
+
+        if self.bidirectional:
+            for t in reversed(range(self.timestep)):
+                h_used_reverse = np.zeros((self.unit)) if t == self.timestep - 1 else self.h_t_reverse[t+1]
+                x_used_reverse = x[t]
+                h_reverse[t] = np.tanh(x_used_reverse @ self.input_weights_reverse + h_used_reverse @ self.hidden_weights_reverse + self.bias_reverse)
+                self.h_t_reverse[t] = h_reverse[t]
+
+        if self.return_sequence:
+            if self.bidirectional:
+                return np.concatenate([h, h_reverse], axis=1)
             else:
-                for t in range(self.hidden_length - self.taken_output, self.hidden_length):
-                    h_res = np.tanh(np.dot(self.hidden_state[layer-1][t], self.hh_weights_up[layer-1][t]) + self.hh_bias[layer][t])
-                    self.hidden_state[layer][t] = h_res
-                    outputs.append(h_res)
+                return h
+        else:
+            if self.bidirectional:
+                return np.concatenate([h[-1], h_reverse[0]])
+            else:
+                return h[-1]
 
-            if (self.bidirectional):
-                if (layer >= 0):
-                    for t in reversed(range(self.hidden_length)):
-                        x_t = x[t] if t < self.input_length else np.zeros(self.input_size)
-                        h_res_reverse = np.dot(self.hh_weights_reverse[layer][t], self.h_end[layer] if t == self.hidden_length - 1 else self.hidden_state_reverse[layer][t+1]) + self.hh_bias_reverse[layer][t]
-                        h_res_reverse = np.tanh(h_res_reverse + np.dot(x_t, self.ih_weights[t]))
-                        self.hidden_state_reverse[layer][t] = h_res_reverse
-                elif (layer > 0 and layer < self.num_layers - 1):
-                    for t in reversed(range(self.hidden_length)):
-                        h_res_reverse = np.dot(self.hh_weights_reverse[layer][t], self.h_end[layer] if t == self.hidden_length - 1 else self.hidden_state_reverse[layer][t+1]) + self.hh_bias_reverse[layer][t]
-                        h_res_reverse = np.tanh(h_res_reverse + np.dot(self.hidden_state_reverse[layer-1][t], self.hh_weights_reverse_up[layer-1][t]) + self.hh_bias_reverse[layer][t])
-                        self.hidden_state_reverse[layer][t] = h_res_reverse
-                else:
-                    for idx, t in enumerate(range(self.hidden_length - self.taken_output, self.hidden_length)):
-                        h_res_reverse = np.tanh(np.dot(self.hidden_state_reverse[layer-1][t], self.hh_weights_reverse_up[layer-1][t]) + self.hh_bias_reverse[layer][t])
-                        self.hidden_state_reverse[layer][t] = h_res_reverse
-                        self.final_hidden_state[idx] = np.concatenate([self.hidden_state[layer][t], self.hidden_state_reverse[layer][t]])
-
-        return outputs if not self.bidirectional else self.final_hidden_state
-    
-    # def backward(self, dLast: np.ndarray):
-    #     seq_length = dLast.shape[0]
-    #     dweight_ih = np.zeros_like(self.ih_weights)
-    #     dweight_hh = np.zeros_like(self.hh_weights)
-    #     dbias_ih = np.zeros_like(self.ih_bias)
-    #     dbias_hh = np.zeros_like(self.hh_bias)
-
-    #     if (self.bidirectional):
-    #         dweight_ih_reverse = np.zeros_like(self.ih_weights_reverse)
-    #         dweight_hh_reverse = np.zeros_like(self.hh_weights_reverse)
-    #         dbias_ih_reverse = np.zeros_like(self.ih_bias_reverse)
-    #         dbias_hh_reverse = np.zeros_like(self.hh_bias_reverse)
-
-    #     dh_next = np.zeros((self.num_layers, self.hidden_size))
-    #     dh_next_reverse = np.zeros((self.num_layers, self.hidden_size))
-
-    #     for layer in reversed(range(self.num_layers)):
-    #         for t in reversed(range(seq_length)):
-    #             h_t = self.hidden_state[layer][t]
-    #             h_prev = self.hidden_state[layer][t - 1] if t > 0 else np.zeros_like((self.hidden_size))
-    #             x_t = self.last_input[t]
-
-    #             dh = dLast[t] + dh_next[layer]
-
-    #             dtanh = (1 - h_t ** 2) * (dh)
-                
-    #             if (layer == 0):
-    #                 dweight_ih += np.outer(x_t, dtanh)
-    #                 dbias_ih += dtanh
-    #             dweight_hh[layer] += np.outer(h_prev, dtanh)
-    #             dbias_hh[layer] += dtanh
-
-    #             dh_next[layer] = np.dot(self.hh_weights[layer], dtanh)
-
-    #         if (self.bidirectional):
-    #             for t in range(seq_length):
-    #                 h_t_reverse = self.hidden_state_reverse[layer][t]
-    #                 h_prev_reverse = self.hidden_state_reverse[layer][t-1] if t > 0 else np.zeros_like(self.hidden_size)
-    #                 x_t_reverse = self.last_input[t]
-
-    #                 dh_reverse = dLast[t] + dh_next_reverse[layer]
-
-    #                 dtanh_reverse = (1 - h_t_reverse ** 2) * dh_reverse
-
-    #                 if (layer == 0):
-    #                     dweight_ih_reverse += np.outer(x_t_reverse, dtanh_reverse)
-    #                     dbias_ih_reverse += dtanh_reverse
-    #                 dweight_hh_reverse[layer] += np.outer(h_prev_reverse, dtanh_reverse)
-    #                 dbias_hh_reverse[layer] += dtanh_reverse
-
-    #                 dh_next_reverse[layer] = np.dot(self.hh_weights_reverse[layer], dtanh_reverse)
-        
-    #     return {
-    #         "dweight_ih": dweight_ih,
-    #         "dweight_ih_reverse": dweight_ih_reverse if self.bidirectional else None,
-    #         "dweight_hh": dweight_hh,
-    #         "dweight_hh_reverse": dweight_hh_reverse if self.bidirectional else None,
-    #         "dbias_ih": dbias_ih,
-    #         "dbias_ih_reverse": dbias_ih_reverse if self.bidirectional else None,
-    #         "dbias_hh": dbias_hh,
-    #         "dbias_hh_reverse": dbias_hh_reverse if self.bidirectional else None
-    #     }
-    
-    # def learn(self, dLast: np.ndarray, learning_rate: float):
-    #     dGotten = self.backward(dLast)
-    #     self.ih_weights -= learning_rate * dGotten["dweight_ih"]
-    #     self.hh_weights -= learning_rate * dGotten["dweight_hh"]
-    #     self.ih_bias -= learning_rate * dGotten["dbias_ih"]
-    #     self.hh_bias -= learning_rate * dGotten["dbias_hh"]
-
-    #     if self.bidirectional:
-    #         self.ih_weights_reverse -= learning_rate * dGotten["dweight_ih_reverse"]
-    #         self.hh_weights_reverse -= learning_rate * dGotten["dweight_hh_reverse"]
-    #         self.ih_bias_reverse -= learning_rate * dGotten["dbias_ih_reverse"]
-    #         self.hh_bias_reverse -= learning_rate * dGotten["dbias_hh_reverse"]
-    
 class LSTM:
-    def __init__(self, input_size, hidden_size, num_layers, taken_output, input_length, hidden_length, bidirectional=True):
-        # Attribute Definition
+    def __init__(self, unit, input_size, timestep, return_sequence, bidirectional=False):
+        self.unit = unit
         self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
+        self.timestep = timestep
         self.bidirectional = bidirectional
         self.last_input = None
-        self.input_length = input_length
-        self.hidden_length = hidden_length
-        self.taken_output = taken_output
-        self.hidden_state = None
-        self.hidden_state_reverse = None
-        self.final_hidden_state = None
-        self.cell_state = None
-        self.cell_state_reverse = None
-        self.input_gate = None
-        self.input_gate_reverse = None
-        self.forget_gate = None
-        self.forget_gate_reverse = None
-        self.gate = None
-        self.gate_reverse = None
-        self.output_gate = None
-        self.output_gate_reverse = None
+        self.return_sequence = return_sequence
 
-        # Hidden State
-        self.h_begin = [np.zeros(self.hidden_size, self.hidden_size) for _ in range(num_layers)]
+        self.input_weights = [UtilisationFunctions.xavier(input_size, unit, 'weight') for _ in range(4)]
+        self.hidden_weights = [UtilisationFunctions.xavier(unit, unit, 'weight') for _ in range(4)]
 
-        if (self.bidirectional):
-            self.h_end = [np.zeros(self.hidden_size, self.hidden_size) for _ in range(num_layers)]
+        self.bias = [UtilisationFunctions.xavier(1, unit, 'bias') for _ in range(4)]
 
-        # Cell State
-        self.c_begin = [np.zeros(self.hidden_size, self.hidden_size) for _ in range(num_layers)]
-
-        if (self.bidirectional):
-            self.c_end = [np.zeros(self.hidden_size, self.hidden_size) for _ in range(num_layers)]
-
-        # Weight Utilisation
-        self.ih_weights = [[UtilisationFunctions.xavier(self.input_size, self.hidden_size, "weight") for _ in range(4)] for _ in range(input_length)]
-        self.hh_weights = [[[UtilisationFunctions.xavier(self.hidden_size, self.hidden_size, "weight") for _ in range(4)] for _ in range(hidden_length)] for _ in range(num_layers)]
-        self.hh_weights_up = [[[UtilisationFunctions.xavier(self.hidden_size, self.hidden_size, "weight") for _ in range(4)] for _ in range(hidden_length)] for _ in range(num_layers - 1)]
-        self.gate_weights = [[[UtilisationFunctions.xavier(self.hidden_size, self.hidden_size, "weight") for _ in range(4)] for _ in range(hidden_length)] for _ in range(num_layers)]
+        self.h_t = np.zeros((timestep, unit))
+        self.c_t = np.zeros((timestep, unit))
 
         if self.bidirectional:
-            self.ih_weights_reverse = [[UtilisationFunctions.xavier(self.input_size, self.hidden_size, "weight") for _ in range(4)] for _ in range(input_length)]
-            self.hh_weights_reverse = [[[UtilisationFunctions.xavier(self.hidden_size, self.hidden_size, "weight") for _ in range(4)] for _ in range(hidden_length)] for _ in range(num_layers)]
-            self.hh_weights_reverse_up = [[[UtilisationFunctions.xavier(self.hidden_size, self.hidden_size, "weight") for _ in range(4)] for _ in range(hidden_length)] for _ in range(num_layers - 1)]
-            self.gate_weights_reverse = [[[UtilisationFunctions.xavier(self.hidden_size, self.hidden_size, "weight") for _ in range(4)] for _ in range(hidden_length)] for _ in range(num_layers)]
-            self.final_hidden_state = None
+            self.input_weights_reverse = [UtilisationFunctions.xavier(input_size, unit, 'weight') for _ in range(4)]
+            self.hidden_weights_reverse = [UtilisationFunctions.xavier(unit, unit, 'weight') for _ in range(4)]
 
-        # Bias Utilisation
-        self.hh_bias = [[UtilisationFunctions.xavier(self.hidden_size, self.hidden_size, "bias") for _ in range(4)] for _ in range(num_layers)]
+            self.bias_reverse = [UtilisationFunctions.xavier(1, unit, 'bias') for _ in range(4)]
 
-        if self.bidirectional:
-            self.hh_bias_reverse = [[UtilisationFunctions.xavier(self.hidden_size, self.hidden_size, "bias") for _ in range(4)] for _ in range(num_layers)]
+            self.h_t_reverse = np.zeros((timestep, unit))
+            self.c_t_reverse = np.zeros((timestep, unit))
 
     def forward(self, x: np.ndarray):
         self.last_input = x
-        self.hidden_state = np.zeros((self.num_layers, self.hidden_length, self.hidden_size))
-        self.cell_state = np.zeros((self.num_layers, self.hidden_length, self.hidden_size))
-        self.final_hidden_state = np.zeros((self.taken_output, 2 * self.hidden_size))
-        self.input_gate = np.zeros((self.num_layers, self.hidden_length, self.hidden_size))
-        self.forget_gate = np.zeros((self.num_layers, self.hidden_length, self.hidden_size))
-        self.gate = np.zeros((self.num_layers, self.hidden_length, self.hidden_size))
-        self.output_gate = np.zeros((self.num_layers, self.hidden_length, self.hidden_size))
+        h = np.zeros((self.timestep, self.unit))
+        c = np.zeros((self.timestep, self.unit))
 
-        if (self.bidirectional):
-            self.hidden_state_reverse = np.zeros((self.num_layers, self.hidden_length, self.hidden_size))
-            self.cell_state_reverse = np.zeros((self.num_layers, self.hidden_length, self.hidden_size))
-            self.input_gate_reverse = np.zeros((self.num_layers, self.hidden_length, self.hidden_size))
-            self.forget_gate_reverse = np.zeros((self.num_layers, self.hidden_length, self.hidden_size))
-            self.gate_reverse = np.zeros((self.num_layers, self.hidden_length, self.hidden_size))
-            self.output_gate_reverse = np.zeros((self.num_layers, self.hidden_length, self.hidden_size))
+        if self.bidirectional:
+            h_reverse = np.zeros((self.timestep, self.unit))
+            c_reverse = np.zeros((self.timestep, self.unit))
 
-        for layer in range(self.num_layers):
-            outputs = []
+        for t in range(self.timestep):
+            h_used = np.zeros((self.unit)) if t == 0 else self.h_t[t-1]
+            c_used = np.zeros((self.unit)) if t == 0 else self.c_t[t-1]
+            x_used = x[t]
 
-            if (layer <= 0):
-                for t in range(self.hidden_length):
-                    x_t = x[t] if t < self.input_length else np.zeros(self.input_size)
-                    self.forget_gate[layer][t] = np.dot(self.hh_weights[layer][t][0], self.h_begin[layer] if t == 0 else self.hidden_state[layer][t-1]) + self.hh_bias[layer][t][0]
-                    self.forget_gate[layer][t] = UtilisationFunctions.sigmoid(self.forget_gate[layer][t] + np.dot(x_t, self.ih_weights[t][0]))
-                    self.input_gate[layer][t] = np.dot(self.hh_weights[layer][t][1], self.h_begin[layer] if t == 0 else self.hidden_state[layer][t-1]) + self.hh_bias[layer][t][1]
-                    self.input_gate[layer][t] = UtilisationFunctions.sigmoid(self.input_gate[layer][t] + np.dot(x_t, self.ih_weights[t][1]))
-                    self.gate[layer][t] = np.dot(self.hh_weights[layer][t][2], self.h_begin[layer] if t == 0 else self.hidden_state[layer][t-1]) + self.hh_bias[layer][t][2]
-                    self.gate[layer][t] = np.tanh(self.gate[layer][t] + np.dot(x_t, self.ih_weights[t][2]))
-                    self.output_gate[layer][t] = np.dot(self.hh_weights[layer][t][3], self.h_begin[layer] if t == 0 else self.hidden_state[layer][t-1]) + self.hh_bias[layer][t][3]
-                    self.output_gate[layer][t] = UtilisationFunctions.sigmoid(self.output_gate[layer][t] + np.dot(x_t, self.ih_weights[t][3]))
-                    self.cell_state[layer][t] = (self.c_begin[layer] if t == 0 else self.cell_state[layer][t-1])*self.forget_gate[layer][t] + self.input_gate[layer][t] * self.gate[layer][t]
-                    self.hidden_state[layer][t] = np.tanh(self.cell_state[layer][t]) * self.output_gate[layer][t]
-            elif (layer > 0 and layer < self.num_layers - 1):
-                for t in range(self.hidden_length):
-                    self.forget_gate[layer][t] = np.dot(self.hh_weights[layer][t][0], self.h_begin[layer] if t == 0 else self.hidden_state[layer][t-1]) + self.hh_bias[layer][t][0]
-                    self.forget_gate[layer][t] = UtilisationFunctions.sigmoid(self.forget_gate[layer][t] + np.dot(self.hidden_state[layer-1][t], self.hh_weights_up[layer-1][t][0]))
-                    self.input_gate[layer][t] = np.dot(self.hh_weights[layer][t][1], self.h_begin[layer] if t == 0 else self.hidden_state[layer][t-1]) + self.hh_bias[layer][t][1]
-                    self.input_gate[layer][t] = UtilisationFunctions.sigmoid(self.input_gate[layer][t] + np.dot(self.hidden_state[layer-1][t], self.hh_weights_up[layer-1][t][1]))
-                    self.gate[layer][t] = np.dot(self.hh_weights[layer][t][2], self.h_begin[layer] if t == 0 else self.hidden_state[layer][t-1]) + self.hh_bias[layer][t][2]
-                    self.gate[layer][t] = UtilisationFunctions.sigmoid(self.gate[layer][t] + np.dot(self.hidden_state[layer-1][t], self.hh_weights_up[layer-1][t][2]))
-                    self.output_gate[layer][t] = np.dot(self.hh_weights[layer][t][3], self.h_begin[layer] if t == 0 else self.hidden_state[layer][t-1]) + self.hh_bias[layer][t][3]
-                    self.output_gate[layer][t] = UtilisationFunctions.sigmoid(self.output_gate[layer][t] + np.dot(self.hidden_state[layer-1][t], self.hh_weights_up[layer-1][t][3]))
-                    self.cell_state[layer][t] = (self.c_begin[layer] if t == 0 else self.cell_state[layer][t-1])*self.forget_gate[layer][t] + self.input_gate[layer][t] * self.gate[layer][t]
-                    self.hidden_state[layer][t] = np.tanh(self.cell_state[layer][t]) * self.output_gate[layer][t]
-            else:
-                for t in range(self.hidden_length - self.taken_output, self.hidden_length):
-                    self.forget_gate[layer][t] = UtilisationFunctions.sigmoid(self.forget_gate[layer][t] + np.dot(self.hidden_state[layer-1][t], self.hh_weights_up[layer-1][t][0]) + self.hh_bias[layer][t][0])
-                    self.input_gate[layer][t] = UtilisationFunctions.sigmoid(self.input_gate[layer][t] + np.dot(self.hidden_state[layer-1][t], self.hh_weights_up[layer-1][t][1]) + self.hh_bias[layer][t][1])
-                    self.gate[layer][t] = np.tanh(self.gate[layer][t] + np.dot(self.hidden_state[layer-1][t], self.hh_weights_up[layer-1][t][2]) + self.hh_bias[layer][t][2])
-                    self.output_gate[layer][t] = UtilisationFunctions.sigmoid(self.output_gate[layer][t] + np.dot(self.hidden_state[layer-1][t], self.hh_weights_up[layer-1][t][3]) + self.hh_bias[layer][t][3])
-                    self.cell_state[layer][t] = self.input_gate[layer][t] * self.gate[layer][t]
-                    self.hidden_state[layer][t] = np.tanh(self.cell_state[layer][t]) * self.output_gate[layer][t]
-                    outputs.append(self.hidden_state[layer][t])
+            f = UtilisationFunctions.sigmoid(x_used @ self.input_weights[0] + h_used @ self.hidden_weights[0] + self.bias[0])
+            i = UtilisationFunctions.sigmoid(x_used @ self.input_weights[1] + h_used @ self.hidden_weights[1] + self.bias[1])
+            a = np.tanh(x_used @ self.input_weights[2] + h_used @ self.hidden_weights[2] + self.bias[2])
+            o = UtilisationFunctions.sigmoid(x_used @ self.input_weights[3] + h_used @ self.hidden_weights[3] + self.bias[3])
 
-            if (self.bidirectional):
-                if (layer <= 0):
-                    for t in reversed(range(self.hidden_length)):
-                        x_t = x[t] if t < self.input_length else np.zeros(self.input_size)
-                        self.forget_gate_reverse[layer][t] = np.dot(self.hh_weights_reverse[layer][t][0], self.h_end[layer] if t == self.hidden_length - 1 else self.hidden_state_reverse[layer][t+1]) + self.hh_bias_reverse[layer][t][0]
-                        self.forget_gate_reverse[layer][t] = UtilisationFunctions.sigmoid(self.forget_gate_reverse[layer][t] + np.dot(x_t, self.ih_weights_reverse[t][0]))
-                        self.input_gate_reverse[layer][t] = np.dot(self.hh_weights_reverse[layer][t][1], self.h_end[layer] if t == self.hidden_length - 1 else self.hidden_state_reverse[layer][t+1]) + self.hh_bias_reverse[layer][t][1]
-                        self.input_gate_reverse[layer][t] = UtilisationFunctions.sigmoid(self.input_gate_reverse[layer][t] + np.dot(x_t, self.ih_weights_reverse[t][1]))
-                        self.gate_reverse[layer][t] = np.dot(self.hh_weights_reverse[layer][t][2], self.h_end[layer] if t == self.hidden_length - 1 else self.hidden_state_reverse[layer][t+1]) + self.hh_bias_reverse[layer][t][2]
-                        self.gate_reverse[layer][t] = np.tanh(self.gate_reverse[layer][t] + np.dot(x_t, self.ih_weights_reverse[t][2]))
-                        self.output_gate_reverse[layer][t] = np.dot(self.hh_weights_reverse[layer][t][3], self.h_end[layer] if t == self.hidden_length - 1 else self.hidden_state_reverse[layer][t+1]) + self.hh_bias_reverse[layer][t][3]
-                        self.output_gate_reverse[layer][t] = UtilisationFunctions.sigmoid(self.output_gate_reverse[layer][t] + np.dot(x_t, self.ih_weights_reverse[t][3]))
-                        self.cell_state_reverse[layer][t] = (self.c_end[layer] if t == self.hidden_length - 1 else self.cell_state[layer][t+1])*self.forget_gate_reverse[layer][t] + self.input_gate_reverse[layer][t] * self.gate_reverse[layer][t]
-                        self.hidden_state_reverse[layer][t] = np.tanh(self.cell_state_reverse[layer][t]) * self.output_gate_reverse[layer][t]
-                elif (layer > 0 and layer < self.num_layers - 1):
-                    for t in reversed(range(self.hidden_length)):
-                        self.forget_gate_reverse[layer][t] = np.dot(self.hh_weights_reverse[layer][t][0], self.h_end[layer] if t == self.hidden_length - 1 else self.hidden_state_reverse[layer][t+1]) + self.hh_bias_reverse[layer][t][0]
-                        self.forget_gate_reverse[layer][t] = UtilisationFunctions.sigmoid(self.forget_gate_reverse[layer][t] + np.dot(self.hidden_state_reverse[layer-1][t], self.hh_weights_reverse_up[layer-1][t][0]))
-                        self.input_gate_reverse[layer][t] = np.dot(self.hh_weights_reverse[layer][t][1], self.h_end[layer] if t == self.hidden_length - 1 else self.hidden_state_reverse[layer][t+1]) + self.hh_bias_reverse[layer][t][1]
-                        self.input_gate_reverse[layer][t] = UtilisationFunctions.sigmoid(self.input_gate_reverse[layer][t] + np.dot(self.hidden_state_reverse[layer-1][t], self.hh_weights_reverse_up[layer-1][t][1]))
-                        self.gate_reverse[layer][t] = np.dot(self.hh_weights_reverse[layer][t][2], self.h_end[layer] if t == self.hidden_length - 1 else self.hidden_state_reverse[layer][t+1]) + self.hh_bias_reverse[layer][t][2]
-                        self.gate_reverse[layer][t] = np.tanh(self.gate_reverse[layer][t] + np.dot(self.hidden_state_reverse[layer-1][t], self.hh_weights_reverse_up[layer-1][t][2]))
-                        self.output_gate_reverse[layer][t] = np.dot(self.hh_weights_reverse[layer][t][3], self.h_end[layer] if t == self.hidden_length - 1 else self.hidden_state_reverse[layer][t+1]) + self.hh_bias_reverse[layer][t][3]
-                        self.output_gate_reverse[layer][t] = UtilisationFunctions.sigmoid(self.output_gate_reverse[layer][t] + np.dot(self.hidden_state_reverse[layer-1][t], self.hh_weights_reverse_up[layer-1][t][3]))
-                        self.cell_state_reverse[layer][t] = (self.c_end[layer] if t == self.hidden_length - 1 else self.cell_state[layer][t+1])*self.forget_gate_reverse[layer][t] + self.input_gate_reverse[layer][t] * self.gate_reverse[layer][t]
-                        self.hidden_state_reverse[layer][t] = np.tanh(self.cell_state_reverse[layer][t]) * self.output_gate_reverse[layer][t]
-                else:
-                    for idx, t in enumerate(range(self.hidden_length - self.taken_output, self.hidden_length)):
-                        self.forget_gate_reverse[layer][t] = UtilisationFunctions.sigmoid(self.forget_gate_reverse[layer][t] + np.dot(self.hidden_state_reverse[layer-1][t], self.hh_weights_reverse_up[layer-1][t][0]) + self.hh_bias_reverse[layer][t][0])
-                        self.input_gate_reverse[layer][t] = UtilisationFunctions.sigmoid(self.input_gate_reverse[layer][t] + np.dot(self.hidden_state_reverse[layer-1][t], self.hh_weights_reverse_up[layer-1][t][1]) + self.hh_bias_reverse[layer][t][1])
-                        self.gate_reverse[layer][t] = np.tanh(self.gate_reverse[layer][t] + np.dot(self.hidden_state_reverse[layer-1][t], self.hh_weights_reverse_up[layer-1][t][2]) + self.hh_bias_reverse[layer][t][2])
-                        self.output_gate_reverse[layer][t] = UtilisationFunctions.sigmoid(self.output_gate_reverse[layer][t] + np.dot(self.hidden_state_reverse[layer-1][t], self.hh_weights_reverse_up[layer-1][t][3]) + self.hh_bias_reverse[layer][t][3])
-                        self.cell_state_reverse[layer][t] = self.input_gate_reverse[layer][t] * self.gate_reverse[layer][t]
-                        self.hidden_state_reverse[layer][t] = np.tanh(self.cell_state_reverse[layer][t]) * self.output_gate_reverse[layer][t]
-                        self.final_hidden_state[idx] = np.concatenate([self.hidden_state[layer][t], self.hidden_state_reverse[layer][t]])
-            
-        return np.array(outputs) if not self.bidirectional else self.final_hidden_state
+            c[t] = (c_used * f) + (i * a)
+            h[t] = np.tanh(c[t]) * o
 
-    # def backward(self, dLast: np.ndarray):
-    #     seq_length = dLast.shape[0]
+            self.c_t[t] = c[t]
+            self.h_t[t] = h[t]
 
-    #     dweight_ih = np.zeros_like(self.ih_weights)
-    #     dweight_hh = np.zeros_like(self.hh_weights)
-    #     dbias_ih = np.zeros_like(self.ih_bias)
-    #     dbias_hh = np.zeros_like(self.hh_bias)
+        if self.bidirectional:
+            for t in reversed(range(self.timestep)):
+                h_used_reverse = np.zeros((self.unit)) if t == self.timestep - 1 else self.h_t_reverse[t+1]
+                c_used_reverse = np.zeros((self.unit)) if t == self.timestep - 1 else self.c_t_reverse[t+1]
+                x_used_reverse = x[t]
 
-    #     dh_next = np.zeros((self.hidden_size))
-    #     dc_next = np.zeros((self.hidden_size))
-
-    #     if (self.bidirectional):
-    #         dweight_ih_reverse = np.zeros_like(self.ih_weights_reverse)
-    #         dweight_hh_reverse = np.zeros_like(self.hh_weights_reverse)
-    #         dbias_ih_reverse = np.zeros_like(self.ih_bias_reverse)
-    #         dbias_hh_reverse = np.zeros_like(self.hh_bias_reverse)
-
-    #         dh_next_reverse = np.zeros((self.hidden_size))
-    #         dc_next_reverse = np.zeros((self.hidden_size))
-
-    #     for layer in range(self.num_layers):
-    #         for t in reversed(range(seq_length)):
-    #             i = self.input_gate[layer][t]
-    #             f = self.forget_gate[layer][t]
-    #             g = self.gate[layer][t]
-    #             o = self.output_gate[layer][t]
-    #             c = self.cell_state[layer][t]
-    #             h = self.hidden_state[layer][t]
-    #             x_t = self.last_input[layer][t]
-    #             c_prev = self.cell_state[layer][t - 1]
-    #             h_prev = self.hidden_state[layer][t - 1]
-
-    #             dh = dLast[layer][t] + dh_next
-    #             do = dh * np.tanh(c)
-    #             do_act = do * UtilisationFunctions.sigmoid_derivative(o)
+                f_reverse = UtilisationFunctions.sigmoid(x_used_reverse @ self.input_weights_reverse[0] + 
+                                                         h_used_reverse @ self.hidden_weights_reverse[0] +
+                                                         self.bias_reverse[0])
+                i_reverse = UtilisationFunctions.sigmoid(x_used_reverse @ self.input_weights_reverse[1] +
+                                                         h_used_reverse @ self.hidden_weights_reverse[1] +
+                                                         self.bias_reverse[1])
+                a_reverse = np.tanh(x_used_reverse @ self.input_weights_reverse[2] +
+                                    h_used_reverse @ self.hidden_weights_reverse[2] +
+                                    self.bias_reverse[2])
+                o_reverse = UtilisationFunctions.sigmoid(x_used_reverse @ self.input_weights_reverse[3] +
+                                                         h_used_reverse @ self.hidden_weights_reverse[3] +
+                                                         self.bias_reverse[3])
                 
-    #             dc = dh * o * UtilisationFunctions.tanh_derivative(np.tanh(c)) + dc_next
-    #             di = dc * g
-    #             di_act = di * UtilisationFunctions.sigmoid_derivative(i)
+                c_reverse[t] = (c_used_reverse * f_reverse) + (i_reverse * a_reverse)
+                h_reverse[t] = np.tanh(c_reverse[t]) * o_reverse
 
-    #             dg = dc * i
-    #             dg_act = dg * UtilisationFunctions.sigmoid_derivative(g)
+                self.c_t_reverse[t] = c_reverse[t]
+                self.h_t_reverse[t] = h_reverse[t]
 
-    #             df = dc * c_prev
-    #             df_act = df * UtilisationFunctions.sigmoid_derivative(f)
-
-    #             dweight_ih[0] += np.outer(x_t, df_act)
-    #             dweight_ih[1] += np.outer(x_t, di_act)
-    #             dweight_ih[2] += np.outer(x_t, dg_act)
-    #             dweight_ih[3] += np.outer(x_t, do_act)
-
-    #             dweight_hh[0] += np.outer(h_prev, df_act)
-    #             dweight_hh[1] += np.outer(h_prev, di_act)
-    #             dweight_hh[2] += np.outer(h_prev, dg_act)
-    #             dweight_hh[3] += np.outer(h_prev, do_act)
-
-    #             dbias_ih[0] += df_act
-    #             dbias_ih[1] += di_act
-    #             dbias_ih[2] += dg_act
-    #             dbias_ih[3] += do_act
-
-    #             dbias_hh[0] += df_act
-    #             dbias_hh[1] += di_act
-    #             dbias_hh[2] += dg_act
-    #             dbias_hh[3] += do_act
-
-    #             dx = (np.dot(self.ih_weights[0], df_act) +
-    #                 np.dot(self.ih_weights[1], di_act) +
-    #                 np.dot(self.ih_weights[2], dg_act) +
-    #                 np.dot(self.ih_weights[3], do_act))
-
-    #             dh_next = (np.dot(self.hh_weights[layer][0], df_act) +
-    #                     np.dot(self.hh_weights[layer][1], di_act) +
-    #                     np.dot(self.hh_weights[layer][2], dg_act) +
-    #                     np.dot(self.hh_weights[layer][3], do_act))
-
-    #             dc_next = dc * f
-
-        #     if (self.bidirectional):
-        #         for t in range(seq_length):
-        #             i = self.input_gate_reverse[layer][t]
-        #             f = self.forget_gate_reverse[layer][t]
-        #             g = self.gate_reverse[layer][t]
-        #             o = self.output_gate_reverse[layer][t]
-        #             c = self.cell_state_reverse[layer][t]
-        #             h = self.hidden_state_reverse[layer][t]
-
-        #             x_t = self.last_input[layer][t]
-        #             c_next = self.cell_state_reverse[layer][t + 1] if t < seq_length - 1 else np.zeros(self.hidden_size)
-        #             h_next = self.hidden_state_reverse[layer][t + 1] if t < seq_length - 1 else np.zeros(self.hidden_size)
-
-        #             dh = dLast[t][self.hidden_size:] + dh_next_reverse
-        #             do = dh * np.tanh(c)
-        #             do_act = do * UtilisationFunctions.sigmoid_derivative(o)
-
-        #             dc = dh * o * UtilisationFunctions.tanh_derivative(np.tanh(c)) + dc_next_reverse
-        #             di = dc * g
-        #             di_act = di * UtilisationFunctions.sigmoid_derivative(i)
-
-        #             dg = dc * i
-        #             dg_act = dg * UtilisationFunctions.sigmoid_derivative(g)
-
-        #             df = dc * c_next
-        #             df_act = df * UtilisationFunctions.sigmoid_derivative(f)
-
-        #             dweight_ih_reverse[0] += np.outer(x_t, df_act)
-        #             dweight_ih_reverse[1] += np.outer(x_t, di_act)
-        #             dweight_ih_reverse[2] += np.outer(x_t, dg_act)
-        #             dweight_ih_reverse[3] += np.outer(x_t, do_act)
-
-        #             dweight_hh_reverse[0] += np.outer(h_next, df_act)
-        #             dweight_hh_reverse[1] += np.outer(h_next, di_act)
-        #             dweight_hh_reverse[2] += np.outer(h_next, dg_act)
-        #             dweight_hh_reverse[3] += np.outer(h_next, do_act)
-
-        #             dbias_ih_reverse[0] += df_act
-        #             dbias_ih_reverse[1] += di_act
-        #             dbias_ih_reverse[2] += dg_act
-        #             dbias_ih_reverse[3] += do_act
-
-        #             dbias_hh_reverse[0] += df_act
-        #             dbias_hh_reverse[1] += di_act
-        #             dbias_hh_reverse[2] += dg_act
-        #             dbias_hh_reverse[3] += do_act
-
-        #             dh_next_reverse = (
-        #                 np.dot(self.hh_weights_reverse[layer - 1][0], df_act) +
-        #                 np.dot(self.hh_weights_reverse[layer - 1][1], di_act) +
-        #                 np.dot(self.hh_weights_reverse[layer - 1][2], dg_act) +
-        #                 np.dot(self.hh_weights_reverse[layer - 1][3], do_act)
-        #             )
-
-        #             dc_next_reverse = dc * f
-
-        # return {
-        #     "dweight_ih": dweight_ih,
-        #     "dweight_ih_reverse": dweight_ih_reverse if self.bidirectional else None,
-        #     "dweight_hh": dweight_hh,
-        #     "dweight_hh_reverse": dweight_hh_reverse if self.bidirectional else None,
-        #     "dbias_ih": dbias_ih,
-        #     "dbias_ih_reverse": dbias_ih_reverse if self.bidirectional else None,
-        #     "dbias_hh": dbias_hh,
-        #     "dbias_hh_reverse": dbias_hh_reverse if self.bidirectional else None
-        # }
-    
-    # def learn(self, dLast: np.ndarray, learning_rate: float):
-    #     dGotten = self.backward(dLast)
-    #     self.ih_weights -= learning_rate * dGotten["dweight_ih"]
-    #     self.hh_weights -= learning_rate * dGotten["dweight_hh"]
-    #     self.ih_bias -= learning_rate * dGotten["dbias_ih"]
-    #     self.hh_bias -= learning_rate * dGotten["dbias_hh"]
-
-    #     if self.bidirectional:
-    #         self.ih_weights_reverse -= learning_rate * dGotten["dweight_ih_reverse"]
-    #         self.hh_weights_reverse -= learning_rate * dGotten["dweight_hh_reverse"]
-    #         self.ih_bias_reverse -= learning_rate * dGotten["dbias_ih_reverse"]
-    #         self.hh_bias_reverse -= learning_rate * dGotten["dbias_hh_reverse"]
+        if self.return_sequence:
+            if self.bidirectional:
+                return np.concatenate([h, h_reverse], axis=1)
+            else:
+                return h
+        else:
+            if self.bidirectional:
+                return np.concatenate([h[-1], h_reverse[0]])
+            else:
+                return h[-1]
