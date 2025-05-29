@@ -184,10 +184,6 @@ class FullyConnected:
 
     def forward(self, x):
         self.input = x
-        # print("⚠️ FullyConnected.forward() called")
-        # print("   Input shape:", x.shape)
-        # print("   Weights shape:", self.weights.shape)
-        # print("   Biases shape:", self.biases.shape)
         z = x @ self.weights
         if self.use_rmsnorm:
             z = self.rmsnorm.forward(z)
@@ -208,10 +204,8 @@ class FullyConnected:
             activation_grad = self.activation(self.z, self.output, derivative=True)
             grad = grad_output * activation_grad
         
-        # calculate the bias grad
         self.grad_biases = np.sum(grad, axis=0, keepdims=True)
 
-        # calculate the weight grad and g grad if applicable
         if self.use_rmsnorm:
             grad = self.rmsnorm.backward(grad)        
 
