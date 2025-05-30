@@ -247,7 +247,7 @@ class Dropout:
     def __init__(self, dropout_rate=0.3):
         self.dropout_rate = dropout_rate
         self.mask = None
-        self.training_status = True
+        self.training_status = False
 
     def forward(self, x):
         if self.training_status:
