@@ -18,7 +18,7 @@ CNN, RNN, dan LSTM yang kami implementasikan memiliki fitur-fitur sebagai beriku
 
 1. **Clone repository**
    ```bash
-   git clone https://github.com/ninoaddict/CNN-RNN-LSTM.git
+   git clone https://github.com/scifo04/CNN-RNN-LSTM.git
    cd src
    ```
 
